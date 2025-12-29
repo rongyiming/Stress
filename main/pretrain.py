@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from dataset.dataset import pretrain_create_dataloader
-from main.model import ResLSTMModel
+from main.model import pretrainModel
 import random
 import numpy as np
 import os
@@ -46,7 +46,6 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='计算设备')
     parser.add_argument('--label', type=int, default=-1, help='预训练标签类型')
-    parser.add_argument('--model_name', type=str, default='ResLSTM', help='模型名称')
     parser.add_argument('--dataset', type=str, nargs='+', choices=ALL_DATASETS, default=DATASETS, help='选择数据集: CLAS, WESAD, MTSPD')
     parser.add_argument('--datalength', type=int, default=10)
     parser.add_argument('--overlap', type=float, default=0.5)
@@ -128,8 +127,8 @@ if __name__ == "__main__":
     train_loader, val_loader, test_loader, std_per_type = pretrain_create_dataloader(batch_size=args.batch_size, T=args.datalength, frequency=args.frequency, overlap=args.overlap, datasets=args.dataset)
 
     # 初始化模型、损失函数和优化器
-    if args.model_name == 'ResLSTM':
-        model = ResLSTMModel(input_channels=1, resnet_depth=args.resnet_depth, lstm_input_size=256, lstm_hidden_size=64, lstm_num_layers=1, output_size=len(chosenlabels))
+    model = pretrainModel(input_channels=1, resnet_depth=args.resnet_depth, hidden_size=64, output_size=len(chosenlabels))
+    # model = model.double()
 
     model.to(device)
 
@@ -139,7 +138,7 @@ if __name__ == "__main__":
     short_time = local_now.strftime("%Y%m%d_%H%M%S")
     dataname = [x[0] for x in args.dataset]
     dataname = "".join(dataname)
-    model_path = f'./save/models/{args.model_name}_{args.resnet_depth}_{dataname}_{args.datalength}X{args.frequency}_label{args.label}_pretrained.pth'
+    model_path = f'./save/models/pretrainmodel_{args.resnet_depth}_{dataname}_{args.datalength}X{args.frequency}_label{args.label}_pretrained.pth'
     best_val_loss = float('inf')
     losscnt = 0
 
@@ -156,20 +155,15 @@ if __name__ == "__main__":
             if first and epoch % 5 == 0:  # 每5个epoch打印一次，避免输出过多
                 first = False
                 print(f"输入形状: {inputs.shape}")  # (batch, channels, seq_len)
-                outputs, tmp_out, (lstm_hidden, lstm_cell) = model(inputs, return_intermediates=True)
+                outputs, tmp_out = model(inputs, return_intermediates=True)
                 # 打印tmp输出特征统计
                 print("\n=== tmp输出特征统计 ===")
                 print(f"输出形状: {tmp_out.shape}")  # (batch, channels, seq_len_reduced)
                 tmp_out = tmp_out.reshape(inputs.size(0), -1) # 展平为(batch, feature_dim)
                 analyze_feature_variability(tmp_out)
                 
-                # 打印LSTM隐藏层特征统计（双向LSTM需合并方向）
-                print("\n=== LSTM隐藏层特征统计 ===")
-                print(f"隐藏状态形状: {lstm_hidden.shape}")  # (num_layers*2, batch, hidden_size)
-                lstm_hidden_merged = lstm_hidden.permute(1, 0, 2).reshape(inputs.size(0), -1)  # 合并为(batch, num_layers*2*hidden_size)
-                analyze_feature_variability(lstm_hidden_merged)
             else:
-                outputs, tmp_out, (lstm_hidden, lstm_cell) = model(inputs, return_intermediates=True)
+                outputs, tmp_out = model(inputs, return_intermediates=True)
 
             if outputs.size(0) != labels.size(0):
                 quit("输出和标签的批次大小不匹配！")

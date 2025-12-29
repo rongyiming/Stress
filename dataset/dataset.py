@@ -13,7 +13,7 @@ from scipy.interpolate import interp1d
 from scipy.fft import fft, fftfreq
 from dataset.Feature import preprocess_ppg, calculate_ipa, calculate_sqi
 from sklearn.model_selection import train_test_split
-from individual import individual_feature_pipeline
+from dataset.individual import individual_feature_pipeline
 
 class NewDataset(Dataset):
     def __init__(self, data, labels, dlabels, finetune=False, individual=None):
@@ -26,6 +26,7 @@ class NewDataset(Dataset):
             max = self.labels.max(dim=0, keepdim=True)
             min = self.labels.min(dim=0, keepdim=True)
             self.labels = (self.labels - min.values) / (max.values - min.values)
+            self.individual = None
         self.dlabels = torch.tensor(dlabels, dtype=torch.float)    # next token标签
 
     def __len__(self):
@@ -35,8 +36,13 @@ class NewDataset(Dataset):
         sample = self.data[idx]
         label = self.labels[idx]
         dlabel = self.dlabels[idx]
-
-        return sample, label, dlabel
+        if self.individual is not None:
+            individual = self.individual[idx]
+            return sample, label, dlabel, individual
+        else:
+            individual = None
+            return sample, label, dlabel
+        
 
 # 信号预处理（带通滤波：去除基线漂移和高频噪声）
 def butter_bandpass_filter(data, lowcut, highcut, fs, order=2):

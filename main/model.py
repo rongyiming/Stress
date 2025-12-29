@@ -1,9 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import pywt
 import numpy as np
-import math
 from main.models.resnet1d import resnet18_1d, resnet34_1d, resnet50_1d
 
 class ResLSTMModel(nn.Module):
@@ -85,8 +83,8 @@ class ResLSTMModel(nn.Module):
 
 
 class pretrainModel(nn.Module):
-    def __init__(self, input_channels, resnet_depth, lstm_input_size, lstm_hidden_size, lstm_num_layers, output_size):
-        super(ResLSTMModel, self).__init__()
+    def __init__(self, input_channels, resnet_depth, hidden_size, output_size):
+        super(pretrainModel, self).__init__()
         if resnet_depth == 18:
             self.resnet = resnet18_1d(input_channels=input_channels)
         elif resnet_depth == 34:
@@ -96,24 +94,16 @@ class pretrainModel(nn.Module):
         else:
             raise ValueError("Unsupported ResNet depth. Choose from 18, 34, or 50.")
         self.resnet_outpusize = 512
-        self.linear = nn.Linear(self.resnet_outpusize, lstm_hidden_size)
-        # self.bn0 = nn.BatchNorm1d(lstm_input_size)
-        # self.lstm = nn.LSTM(
-        #     input_size=lstm_input_size,
-        #     hidden_size=lstm_hidden_size,
-        #     num_layers=lstm_num_layers,
-        #     batch_first=True,
-        #     bidirectional=False
-        # )
-        # self._init_lstm_weights()
-        self.bn1 = nn.BatchNorm1d(lstm_hidden_size)
-        self.fc1 = nn.Linear(lstm_hidden_size, 128)  # 中间层增加维度
+        self.linear = nn.Linear(self.resnet_outpusize, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size * 80)
+        self.fc1 = nn.Linear(hidden_size * 80, 128)  # 中间层增加维度
         self.relu = nn.ReLU()  # 引入非线性激活
         self.bn2 = nn.BatchNorm1d(128)
         self.fc2 = nn.Linear(128, output_size)  # 最终输出
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, x, return_intermediates=False):
+        x = x.float()
         x = x.view(x.size(0), x.size(1), -1)  # (batch, seq_len, channels)
         x = x.permute(0, 2, 1)  # (batch, channels, seq_len)
         x = self.resnet(x)  # (batch, output_channels, seq_len)
@@ -121,8 +111,8 @@ class pretrainModel(nn.Module):
         x = x.permute(0, 2, 1)  # (batch, seq_len, output_channels)
         x = self.linear(x)  # (batch, seq_len, lstm_input_size)
         x = self.relu(x)
-        batch_size, seq_len, feat_size = x.size()
-        x = self.bn1(x.contiguous().view(-1, feat_size)).view(batch_size, seq_len, feat_size)
+        batch_size, _ , _ = x.size()
+        x = self.bn1(x.contiguous().view(batch_size, -1))
         x = self.fc1(x)  # (batch, output_size)
         x = self.relu(x)
         x = self.dropout(x)

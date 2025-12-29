@@ -1,10 +1,8 @@
 import numpy as np
 import scipy.signal as signal
 import pywt
-from pyhht import EMD
 from scipy.stats import variation, f_oneway
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
 
 # ===================== 1. 预处理模块 =====================
 def load_ppg_signal(signal_path=None, fs=100, duration=60):
@@ -264,27 +262,6 @@ def extract_time_freq_features(ppg_segment):
     entropy = -np.sum(p * np.log2(p + 1e-6))
     features['wavelet_entropy'] = entropy
     
-    # 2. IMF能量比（HHT分解）
-    try:
-        emd = EMD(ppg_segment)
-        imfs = emd.decompose()
-        # 前3阶IMF能量
-        if len(imfs) >= 3:
-            imf_energies = [np.sum(np.square(imf)) for imf in imfs[:3]]
-            total_imf_energy = np.sum(imf_energies) + 1e-6
-            features['IMF1_ratio'] = imf_energies[0] / total_imf_energy
-            features['IMF2_ratio'] = imf_energies[1] / total_imf_energy
-            features['IMF3_ratio'] = imf_energies[2] / total_imf_energy
-        else:
-            features['IMF1_ratio'] = 0
-            features['IMF2_ratio'] = 0
-            features['IMF3_ratio'] = 0
-    except:
-        # 分解失败时置0
-        features['IMF1_ratio'] = 0
-        features['IMF2_ratio'] = 0
-        features['IMF3_ratio'] = 0
-    
     return features
 
 def extract_all_features(valid_segments, fs):
@@ -409,14 +386,3 @@ if __name__ == "__main__":
     print("="*50)
     for name, val in zip(selected_names, personalized_vector):
         print(f"{name}: {val:.4f}")
-    
-    # 可视化原始PPG与预处理后PPG（可选）
-    plt.figure(figsize=(12, 6))
-    plt.subplot(2,1,1)
-    plt.plot(ppg_signal[:500])  # 前5秒
-    plt.title('原始PPG信号（前5秒）')
-    plt.subplot(2,1,2)
-    plt.plot(clean_ppg[:500])
-    plt.title('预处理后PPG信号（前5秒）')
-    plt.tight_layout()
-    plt.show()
