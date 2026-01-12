@@ -311,7 +311,7 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                         clas['data'].append(segment)
                         clas['label'].append(labels)
                         clas['dlabel'].append(dlabel)
-                        clas['original_data'].append(clas_data[i]['data'][0])
+                        clas['original_data'].append(clas_data[i]['data'][0][-min(1920, len(clas_data[i]['data'][0])):])
                         if labels == 0:
                             cntl0 += 1
         print(cntl0)
@@ -350,7 +350,7 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                         wesad['data'].append(segment)
                         wesad['label'].append(labels)
                         wesad['dlabel'].append(dlabel)
-                        wesad['original_data'].append(wesad_data[i]['data'][0])
+                        wesad['original_data'].append(wesad_data[i]['data'][0][-min(1920, len(wesad_data[i]['data'][0])):])
                         if labels == 0:
                             cntl0 += 1
         print(cntl0)
@@ -398,11 +398,14 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
 
 def build_dataset(df, ids):
     newdf = df[df['id'].isin(ids)]
-    return NewDataset(newdf['data'].tolist(), newdf['labels'].tolist(), newdf['dlabels'].tolist(), finetune=True)
+    return NewDataset(newdf['data'].tolist(), newdf['labels'].tolist(), newdf['dlabels'].tolist(), finetune=True, individual=newdf['individual'].tolist())
     
 def calculate_individual(original_data, frequency=10):
-    individual = individual_feature_pipeline(original_data, fs=frequency)
-    return individual
+    individuals = []
+    for data in original_data:
+        individual, feature_names = individual_feature_pipeline(data, fs=frequency)
+        individuals.append(individual)
+    return individuals
 
 def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.1, worker_init_fn=None):
     """
@@ -421,7 +424,6 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
 
         print(f"数据总量: {len(data)}, 标签总量: {len(labels)}")
         random.shuffle(unique_ids)
-        dataset_obj = NewDataset(data, labels, dlabels, finetune=True, individual=individual)
         train_size = int(len(data) * train_proportion)
         test_size = int(len(data) * test_proportion)
         val_size = len(data) - train_size - test_size
@@ -440,7 +442,8 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
                 'id': ids,
                 'data': data,
                 'labels': labels,
-                'dlabels': dlabels
+                'dlabels': dlabels,
+                'individual': individual
             }
         )
 

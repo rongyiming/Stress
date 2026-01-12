@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from dataset.dataset import finetune_pd_create_dataloader
-from main.model import ResLSTMModel
+from main.model import ResLSTMModel, finetuneModel, pretrainModel
 import random
 import numpy as np
 import os
@@ -47,6 +47,8 @@ def set_seed(seed=1024):
 ALL_DATASETS = ['CLAS', 'WESAD', 'MTSPD']
 DATASETS = ['CLAS', 'WESAD']
 
+chosenlabels = [0, 1, 5]
+
 def parse_args():
     parser = argparse.ArgumentParser(description="模型进行时间序列预训练")
     parser.add_argument('--epochs', type=int, default=1000, help='训练轮数')
@@ -54,8 +56,9 @@ def parse_args():
     parser.add_argument('--learning_rate', type=float, default=0.0003, help='学习率')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='计算设备')
-    parser.add_argument('--label', type=int, default=0, help='预训练标签类型')
+    parser.add_argument('--label', type=int, default=-1, help='预训练标签类型')
     parser.add_argument('--model_name', type=str, default='ResLSTM', help='模型名称')
+    parser.add_argument('--pretrain_name', type=str, default='pretrainmodel', help='预训练模型名称')
     parser.add_argument('--dataset', type=str, nargs='+', choices=ALL_DATASETS, default=DATASETS, help='选择数据集: CLAS, WESAD, MTSPD')
     parser.add_argument('--datalength', type=int, default=10)
     parser.add_argument('--overlap', type=float, default=0.5)
@@ -93,6 +96,8 @@ if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
 
+    if not args.label == -1:
+        chosenlabels = [args.label]
     device = torch.device(args.device)
     print(f"使用设备: {device}")
 
@@ -100,20 +105,26 @@ if __name__ == "__main__":
     datasetlist = finetune_pd_create_dataloader(batch_size=args.batch_size, T=args.datalength, frequency=args.frequency, overlap=args.overlap, datasets=args.dataset)
 
     # 初始化模型、损失函数和优化器
-    if args.model_name == 'ResLSTM':
-        model = ResLSTMModel(input_channels=1, resnet_depth=args.resnet_depth, lstm_input_size=256, lstm_hidden_size=64, lstm_num_layers=1, output_size=2)
+    model = finetuneModel(input_channels=1, resnet_depth=args.resnet_depth, lstm_input_size=256, lstm_hidden_size=64, lstm_num_layers=1, output_size=2, expert_num=10, alpha=0.2)
 
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-    
-    load_path = f'./save/models/ResLSTM_{args.resnet_depth}_CW_{args.datalength}X{args.frequency}_label{args.label}_pretrained.pth'
+
+    pretrain_model = pretrainModel(input_channels=1, resnet_depth=args.resnet_depth, hidden_size=64, output_size=len(chosenlabels))
+
+    load_path = f'./save/models/{args.pretrain_name}_{args.resnet_depth}_CW_{args.datalength}X{args.frequency}_label{args.label}_pretrained.pth'
     pretrained_weights = torch.load(load_path)
 
-    # 若预训练模型输出层与新任务不符，剔除输出层权重
-    pretrained_weights.pop('fc2.weight')
-    pretrained_weights.pop('fc2.bias')
+    pretrain_model.load_state_dict(pretrained_weights, strict=False)  # strict=False忽略无关参数
+
+    # ===================== 3. 提取ResNet部分的参数 =====================
+    # 过滤出key以"resnet."开头的参数（即ResNet模块的参数）
+    resnet_pretrain_params = {
+        k: v for k, v in pretrain_model.state_dict().items()
+        if k.startswith("resnet.")
+    }
     
 
     # 训练循环
@@ -121,19 +132,18 @@ if __name__ == "__main__":
         best_val_loss = float('inf')
         losscnt = 0
         model_path = f'./save/finetune/{args.model_name}_{args.resnet_depth}_{dataset_name}_{args.datalength}_label{args.label}_finetune.pth'
-        model.load_state_dict(pretrained_weights, strict=False)
-        init_output_layer(model.fc2)
-        model.finetune()
+        model.load_state_dict(resnet_pretrain_params, strict=False)
+        # model.finetune()
 
         for epoch in range(args.epochs):
             model.train()
             running_loss = 0.0
             start_time = time.time()
 
-            for inputs, labels, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}"):
-                inputs, labels = inputs.to(device), labels.to(device)
+            for inputs, labels, _, individual in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}"):
+                inputs, labels, individual = inputs.to(device), labels.to(device), individual.to(device)
                 optimizer.zero_grad()
-                outputs = model(inputs)
+                outputs = model(inputs, individual=individual)
                 if outputs.size(0) != labels.size(0):
                     quit("输出和标签的批次大小不匹配！")
                 loss = criterion(outputs, labels)
@@ -149,9 +159,9 @@ if __name__ == "__main__":
             model.eval()
             val_losses = 0.0
             with torch.no_grad():
-                for val_inputs, val_labels, _ in val_loader:
-                    val_inputs, val_labels = val_inputs.to(device), val_labels.to(device)
-                    val_outputs = model(val_inputs)
+                for val_inputs, val_labels, _, val_individual in val_loader:
+                    val_inputs, val_labels, val_individual = val_inputs.to(device), val_labels.to(device), val_individual.to(device)
+                    val_outputs = model(val_inputs, individual=val_individual)
                     val_loss = criterion(val_outputs, val_labels)
                     val_losses += val_loss.item() * val_inputs.size(0)
 
@@ -177,10 +187,10 @@ if __name__ == "__main__":
             labels = []
             preds = []
             with torch.no_grad():
-                for test_inputs, test_labels, _ in test_loader:
+                for test_inputs, test_labels, _, test_individual in test_loader:
 
-                    test_inputs, test_labels = test_inputs.to(device), test_labels.to(device)
-                    test_outputs = model(test_inputs)
+                    test_inputs, test_labels, test_individual = test_inputs.to(device), test_labels.to(device), test_individual.to(device)
+                    test_outputs = model(test_inputs, individual=test_individual)
                     test_loss = criterion(test_outputs, test_labels)
                     test_losses += test_loss.item() * test_inputs.size(0)
 

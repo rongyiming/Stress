@@ -4,20 +4,25 @@ import pywt
 from scipy.stats import variation, f_oneway
 from sklearn.preprocessing import StandardScaler
 
-# ===================== 1. 预处理模块 =====================
-def load_ppg_signal(signal_path=None, fs=100, duration=60):
+# ===================== 1. 预处理模块（适配10Hz） =====================
+def load_ppg_signal(signal_path=None, fs=10, duration=120):
     """
-    加载/生成PPG信号（示例用模拟信号，实际可替换为读取真实数据）
+    加载/生成PPG信号（适配10Hz采样率、120秒时长）
     :param signal_path: 真实PPG数据路径（txt/csv），None则生成模拟信号
-    :param fs: 采样率（Hz）
-    :param duration: 信号时长（秒）
+    :param fs: 采样率（Hz），默认10Hz
+    :param duration: 信号时长（秒），默认120秒
     :return: ppg_signal (np.array), fs
     """
     if signal_path:
         # 读取真实PPG数据（示例：单列数据）
         ppg_signal = np.loadtxt(signal_path)
+        # 确保数据长度匹配10Hz*120s=1200点（若真实数据长度不符，做裁剪/补零）
+        if len(ppg_signal) > fs*duration:
+            ppg_signal = ppg_signal[:fs*duration]
+        elif len(ppg_signal) < fs*duration:
+            ppg_signal = np.pad(ppg_signal, (0, fs*duration - len(ppg_signal)), 'constant')
     else:
-        # 生成模拟静息PPG信号（含基础心率+呼吸调制+轻微噪声）
+        # 生成模拟静息PPG信号（10Hz、120秒，含基础心率+呼吸调制+轻微噪声）
         t = np.linspace(0, duration, fs*duration)
         hr = 70  # 静息心率70次/分
         f_hr = hr/60  # 心率频率
@@ -33,14 +38,14 @@ def load_ppg_signal(signal_path=None, fs=100, duration=60):
 
 def preprocess_ppg(ppg_signal, fs):
     """
-    PPG信号预处理：去基线漂移 + 低通滤波 + 伪影剔除
+    PPG信号预处理：去基线漂移 + 低通滤波 + 伪影剔除（适配10Hz）
     :param ppg_signal: 原始PPG信号
-    :param fs: 采样率
+    :param fs: 采样率（10Hz）
     :return: clean_ppg (去噪后信号), valid_segments (有效分段)
     """
-    # 1. 去基线漂移（db4小波，6层分解，重构时去除低频分量）
+    # 1. 去基线漂移（db4小波，适配10Hz的层数调整为4层，避免过分解）
     wavelet = 'db4'
-    level = 6
+    level = 4  # 10Hz、1200点数据，4层分解更合适（2^4=16点，远小于1200）
     coeffs = pywt.wavedec(ppg_signal, wavelet, level=level)
     # 置零低频系数（基线漂移主要在最高层）
     coeffs[-1] = np.zeros_like(coeffs[-1])
@@ -48,20 +53,20 @@ def preprocess_ppg(ppg_signal, fs):
     ppg_detrend = pywt.waverec(coeffs, wavelet)
     ppg_detrend = ppg_detrend[:len(ppg_signal)]  # 对齐长度
     
-    # 2. 低通滤波（巴特沃斯，截止频率30Hz）
+    # 2. 低通滤波（巴特沃斯，适配10Hz的截止频率）
     nyq = 0.5 * fs
-    cutoff = 30 / nyq
+    cutoff = 8 / nyq  # 8Hz截止频率（10Hz下nyq=5，cutoff=1.6）
     b, a = signal.butter(4, cutoff, btype='low')
     ppg_filtered = signal.filtfilt(b, a, ppg_detrend)
     
-    # 3. 伪影剔除（按10秒分段，计算SNR，保留SNR>10dB的段）
-    segment_len = 10 * fs  # 10秒/段
+    # 3. 伪影剔除（按10秒分段，适配10Hz的平滑窗口）
+    segment_len = 10 * fs  # 10秒/段 → 10*10=100点/段
     n_segments = len(ppg_filtered) // segment_len
     valid_segments = []
     for i in range(n_segments):
         seg = ppg_filtered[i*segment_len : (i+1)*segment_len]
         # 计算SNR（信号能量/噪声能量，噪声=信号-平滑信号）
-        seg_smooth = signal.savgol_filter(seg, 51, 3)
+        seg_smooth = signal.savgol_filter(seg, 15, 4)  
         noise = seg - seg_smooth
         snr = 10 * np.log10(np.sum(seg**2) / (np.sum(noise**2) + 1e-6))
         if snr > 10:
@@ -69,29 +74,35 @@ def preprocess_ppg(ppg_signal, fs):
     
     return ppg_filtered, valid_segments
 
-# ===================== 2. 特征提取模块 =====================
+# ===================== 2. 特征提取模块（适配10Hz） =====================
 def detect_peaks_valleys(ppg_segment, fs):
     """
-    检测PPG分段的波峰、波谷、重搏波
-    :param ppg_segment: 单段PPG信号
-    :param fs: 采样率
+    检测PPG分段的波峰、波谷、重搏波（适配10Hz）
+    :param ppg_segment: 单段PPG信号（10Hz下100点/段）
+    :param fs: 采样率（10Hz）
     :return: peaks (波峰索引), valleys (波谷索引), dw_peaks (重搏波索引)
     """
-    # 检测波峰（最小高度0.2，最小间距=心率周期的1/2）
-    min_distance = int(fs / (100/60))  # 最小间距（按最高心率100次/分）
-    peaks, _ = signal.find_peaks(ppg_segment, height=0.2, distance=min_distance)
+    # 检测波峰（最小高度0.2，最小间距适配10Hz）
+    # 最小间距：按最高心率100次/分 → 周期600ms → 10Hz下=6点
+    min_distance = int(fs / (100/60))  
+    mean = np.mean(ppg_segment)
+    std = np.std(ppg_segment)
+    threshold = mean + 0.5 * std
+    peaks, _ = signal.find_peaks(ppg_segment, height=threshold, distance=min_distance)
     
     # 检测波谷（反转信号找波峰）
-    valleys, _ = signal.find_peaks(-ppg_segment, height=0.2, distance=min_distance)
+    threshold = mean - 0.5 * std
+    valleys, _ = signal.find_peaks(-ppg_segment, height=-threshold, distance=min_distance)
     
-    # 检测重搏波（下降支拐点）
+    # 检测重搏波（下降支拐点，适配10Hz分段长度）
     dw_peaks = []
     for i in range(len(peaks)-1):
         # 取两个波峰之间的下降支
         start = peaks[i]
-        end = valleys[valleys > start][0] if len(valleys[valleys > start])>0 else peaks[i+1]
+        valley_candidates = valleys[valleys > start]
+        end = valley_candidates[0] if len(valley_candidates)>0 else peaks[i+1]
         desc_segment = ppg_segment[start:end]
-        # 找下降支的极小值（重搏波谷）
+        # 找下降支的极小值（重搏波谷），最小高度适配10Hz
         dw_valley, _ = signal.find_peaks(-desc_segment, height=0.1)
         if len(dw_valley) > 0:
             dw_peaks.append(start + dw_valley[0])
@@ -99,10 +110,10 @@ def detect_peaks_valleys(ppg_segment, fs):
     return peaks, valleys, np.array(dw_peaks)
 
 def extract_time_domain_features(ppg_segment, fs, peaks, valleys, dw_peaks):
-    """提取时域特征"""
+    """提取时域特征（逻辑不变，适配10Hz的时间转换）"""
     features = {}
-    # 1. 脉搏波传导时间（PTT）：模拟ECG R波（用PPG波峰前10ms替代，实际需同步ECG）
-    ptt = 0.010  # 10ms（示例值，实际需计算ECG-PPG时差）
+    # 1. 脉搏波传导时间（PTT）：模拟ECG R波（用PPG波峰前10ms替代）
+    ptt = 0.010  # 10ms（示例值，实际需同步ECG）
     features['PTT'] = ptt
     
     # 2. 上升时间（RT）、下降时间（DT）
@@ -111,8 +122,9 @@ def extract_time_domain_features(ppg_segment, fs, peaks, valleys, dw_peaks):
         peak = peaks[0]
         valley_prev = valleys[valleys < peak][-1] if len(valleys[valleys < peak])>0 else 0
         valley_next = valleys[valleys > peak][0] if len(valleys[valleys > peak])>0 else len(ppg_segment)-1
-        rt = (peak - valley_prev) / fs  # 上升时间（秒）
-        dt = (valley_next - peak) / fs  # 下降时间（秒）
+        # valley_next = valleys[valleys > peak][0] if len(valleys > peak)>0 else len(ppg_segment)-1
+        rt = (peak - valley_prev) / fs  # 10Hz下，采样点转秒更精准
+        dt = (valley_next - peak) / fs
         features['RT'] = rt
         features['DT'] = dt
     else:
@@ -130,7 +142,7 @@ def extract_time_domain_features(ppg_segment, fs, peaks, valleys, dw_peaks):
     
     # 4. HRV时域指标（SDNN、RMSSD、pNN50）
     if len(peaks) >= 2:
-        nn_intervals = np.diff(peaks) / fs * 1000  # NN间期（毫秒）
+        nn_intervals = np.diff(peaks) / fs * 1000  # 采样点转毫秒（10Hz下1点=100ms）
         sdnn = np.std(nn_intervals)
         rmssd = np.sqrt(np.mean(np.square(np.diff(nn_intervals))))
         pnn50 = 100 * np.sum(np.abs(np.diff(nn_intervals)) > 50) / len(nn_intervals)
@@ -158,10 +170,11 @@ def extract_time_domain_features(ppg_segment, fs, peaks, valleys, dw_peaks):
     return features
 
 def extract_freq_domain_features(ppg_segment, fs):
-    """提取频域特征"""
+    """提取频域特征（适配10Hz的功率谱计算）"""
     features = {}
-    # 1. 功率谱密度（Welch法）
-    f, psd = signal.welch(ppg_segment, fs, nperseg=256)
+    # 1. 功率谱密度（Welch法，适配10Hz的分段长度）
+    # 10Hz下每段100点，nperseg调整为64（小于100，且为2的幂）
+    f, psd = signal.welch(ppg_segment, fs, nperseg=64, noverlap=32)
     
     # 2. 心率频率（fHR）和呼吸频率（fR）
     hr_band = (0.5, 3)  # 心率频率范围0.5-3Hz（30-180次/分）
@@ -194,33 +207,40 @@ def extract_freq_domain_features(ppg_segment, fs):
     
     # 4. 谱峰宽度（PW）
     if features['fHR'] > 0:
-        hr_peak_val = psd[np.where(f == features['fHR'])[0][0]] if len(np.where(f == features['fHR'])[0])>0 else 0
-        half_max = hr_peak_val / 2
-        # 找半高宽
-        peak_idx = np.argmax(psd[hr_idx])
-        left = hr_idx[np.where(psd[hr_idx][:peak_idx] <= half_max)[0][-1]] if len(np.where(psd[hr_idx][:peak_idx] <= half_max)[0])>0 else hr_idx[0]
-        right = hr_idx[np.where(psd[hr_idx][peak_idx:] >= half_max)[0][-1]] if len(np.where(psd[hr_idx][peak_idx:] >= half_max)[0])>0 else hr_idx[-1]
-        features['PW'] = f[right] - f[left]
+        hr_peak_pos = np.where(f == features['fHR'])[0]
+        if len(hr_peak_pos) > 0:
+            hr_peak_val = psd[hr_peak_pos[0]]
+            half_max = hr_peak_val / 2
+            # 找半高宽
+            peak_idx = np.argmax(psd[hr_idx])
+            left_idx = np.where(psd[hr_idx][:peak_idx] <= half_max)[0]
+            left = hr_idx[left_idx[-1]] if len(left_idx) > 0 else hr_idx[0]
+            right_idx = np.where(psd[hr_idx][peak_idx:] >= half_max)[0]
+            right = hr_idx[right_idx[-1]] if len(right_idx) > 0 else hr_idx[-1]
+            features['PW'] = f[right] - f[left]
+        else:
+            features['PW'] = 0
     else:
         features['PW'] = 0
     
     return features
 
 def extract_morphology_features(ppg_segment, fs, peaks, valleys, dw_peaks):
-    """提取形态学特征"""
+    """提取形态学特征（适配10Hz的时间/斜率计算）"""
     features = {}
     # 1. 波峰斜率（k_up）
     if len(peaks) > 0 and len(valleys) > 0:
-        peak = peaks[0]
+        peak = peaks[-1]
         valley_prev = valleys[valleys < peak][-1] if len(valleys[valleys < peak])>0 else 0
         up_segment = ppg_segment[valley_prev:peak]
-        k_up = np.max(np.gradient(up_segment)) * fs  # 转换为每秒斜率
+        # 10Hz下梯度转换为每秒斜率（*fs）
+        k_up = np.max(np.gradient(up_segment)) * fs
         features['k_up'] = k_up
     else:
         features['k_up'] = 0
     
     # 2. 重搏波位置（Pw）
-    if len(peaks) > 0 and len(dw_peaks) > 0 and 'DT' in features:
+    if len(peaks) > 0 and len(dw_peaks) > 0:
         dt = features.get('DT', 0)
         pw_time = (dw_peaks[0] - peaks[0]) / fs
         features['Pw'] = pw_time / (dt + 1e-6)
@@ -230,10 +250,8 @@ def extract_morphology_features(ppg_segment, fs, peaks, valleys, dw_peaks):
     # 3. 波形对称性（S）
     if len(peaks) > 0:
         peak = peaks[0]
-        # 左半部分（波谷到波峰）
         valley_prev = valleys[valleys < peak][-1] if len(valleys[valleys < peak])>0 else 0
         left_area = np.trapz(ppg_segment[valley_prev:peak])
-        # 右半部分（波峰到下一个波谷）
         valley_next = valleys[valleys > peak][0] if len(valleys[valleys > peak])>0 else len(ppg_segment)-1
         right_area = np.trapz(ppg_segment[peak:valley_next])
         features['S'] = left_area / (right_area + 1e-6)
@@ -248,11 +266,11 @@ def extract_morphology_features(ppg_segment, fs, peaks, valleys, dw_peaks):
     return features
 
 def extract_time_freq_features(ppg_segment):
-    """提取时频域特征（小波能量熵 + IMF能量比）"""
+    """提取时频域特征（小波能量熵，适配10Hz分段长度）"""
     features = {}
-    # 1. 小波能量熵（db4，4层分解）
+    # 1. 小波能量熵（db4，4层分解，适配10Hz的100点分段）
     wavelet = 'db4'
-    level = 4
+    level = 4  # 100点分段，4层分解（2^4=16点）更合适
     coeffs = pywt.wavedec(ppg_segment, wavelet, level=level)
     # 计算各层能量
     energies = [np.sum(np.square(coeff)) for coeff in coeffs]
@@ -265,7 +283,7 @@ def extract_time_freq_features(ppg_segment):
     return features
 
 def extract_all_features(valid_segments, fs):
-    """整合所有特征提取，返回特征矩阵"""
+    """整合所有特征提取，返回特征矩阵（适配10Hz）"""
     all_features = []
     feature_names = []
     for seg in valid_segments:
@@ -285,7 +303,7 @@ def extract_all_features(valid_segments, fs):
     
     return np.array(all_features), feature_names
 
-# ===================== 3. 个性化特征筛选 =====================
+# ===================== 3. 个性化特征筛选（逻辑不变） =====================
 def filter_personalized_features(features_matrix, feature_names, subject_features_list=None):
     """
     个性化特征筛选：
@@ -331,37 +349,40 @@ def filter_personalized_features(features_matrix, feature_names, subject_feature
 
 def individual_feature_pipeline(ppg_signal, fs, subject_features_list=None):
     """
-    个体化特征提取完整流程
+    个体化特征提取完整流程（适配10Hz、120s）
     :param ppg_signal: 原始PPG信号
-    :param fs: 采样率
+    :param fs: 采样率（10Hz）
     :param subject_features_list: 其他个体的特征矩阵列表（用于ANOVA）
     :return: personalized_vector (个性化特征向量), selected_names (特征名称)
     """
     # 1. 预处理
     _, valid_segments = preprocess_ppg(ppg_signal, fs)
-    
-    # 2. 提取所有特征
-    features_matrix, _ = extract_all_features(valid_segments, fs)
-    
-    return features_matrix
 
-# ===================== 4. 主函数 =====================
+    # 2. 提取所有特征
+    features_matrix, feature_names = extract_all_features(valid_segments, fs)
+    
+    feature_list = np.mean(features_matrix, axis=0)
+
+    return feature_list, feature_names
+    # 3. 个性化筛选
+    # personalized_vector, selected_names = filter_personalized_features(
+    #     features_matrix, feature_names, subject_features_list
+    # )
+    
+    # return personalized_vector, selected_names
+
+# ===================== 4. 主函数（测试10Hz、120s数据） =====================
 if __name__ == "__main__":
-    # 步骤1：生成/加载PPG信号（模拟3个个体的静息PPG数据）
-    fs = 100  # 采样率100Hz
+    # 步骤1：生成/加载PPG信号（10Hz、120秒，模拟3个个体）
+    fs = 10  # 固定为10Hz
+    duration = 120  # 固定为120秒
     n_subjects = 3  # 模拟3个个体
     subject_features_list = []
     
     # 生成多个个体的PPG数据（用于ANOVA筛选）
     for sub_id in range(n_subjects):
-        # 生成不同个体的模拟PPG（心率/呼吸频率略有差异）
-        hr = 65 + sub_id * 5  # 个体1:65, 个体2:70, 个体3:75次/分
-        t = np.linspace(0, 60, fs*60)
-        f_hr = hr/60
-        f_resp = 0.2 + sub_id * 0.02  # 呼吸频率略有差异
-        ppg_base = np.sin(2*np.pi*f_hr*t) + 0.2*np.sin(2*np.pi*2*f_hr*t)
-        ppg_resp = ppg_base * (1 + 0.1*np.sin(2*np.pi*f_resp*t))
-        ppg_signal = ppg_resp + 0.05*np.random.randn(len(ppg_resp))
+        # 生成不同个体的模拟PPG（10Hz、120秒，心率/呼吸频率略有差异）
+        ppg_signal, fs = load_ppg_signal(fs=fs, duration=duration)
         
         # 步骤2：预处理
         clean_ppg, valid_segments = preprocess_ppg(ppg_signal, fs)
