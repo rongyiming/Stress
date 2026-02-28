@@ -135,7 +135,7 @@ class finetuneModel(nn.Module):
         else:
             raise ValueError("Unsupported ResNet depth. Choose from 18, 34, or 50.")
         self.alpha = alpha
-        self.individual_size = 19
+        self.individual_size = 12
         self.resnet_outpusize = 512
         self.linear = nn.Linear(self.resnet_outpusize, lstm_input_size)
         self.bn0 = nn.BatchNorm1d(lstm_input_size)
@@ -162,7 +162,8 @@ class finetuneModel(nn.Module):
         self.relu = nn.ReLU()
         self.bn2 = nn.BatchNorm1d(128)
         self.fc2 = nn.Linear(128, output_size)
-        self.dropout = nn.Dropout(0.5)
+        self.dropout2 = nn.Dropout(0.2)
+        self.dropout5 = nn.Dropout(0.5)
 
     def _init_lstm_experts_weights(self):
         """初始化所有LSTM专家的权重（适配多专家场景）"""
@@ -181,6 +182,48 @@ class finetuneModel(nn.Module):
     def finetune(self):
         for param in self.resnet.parameters():
             param.requires_grad = False
+    
+    def moe_balance_loss(self,expert_weights):
+        """
+        计算MOE专家负载均衡Loss（方差形式，高效）
+        :param expert_weights: 形状 [B, N]，B=批次大小，N=专家数量
+        :return: 标量，均衡Loss
+        """
+        # 步骤1：计算每个专家在批次内的平均激活值 [N]
+        expert_avg = torch.mean(expert_weights, dim=0)
+        # 步骤2：计算方差（方差越小，负载越均衡）
+        expert_var = torch.var(expert_avg, unbiased=False)
+        return expert_var
+
+    def feature_expert_consist_loss(self, special_features, expert_params, sample_pairs_num=None):
+        """
+       特征-参数一致性Loss（随机采样样本对，控制计算量）
+        :param special_features: 形状 [B, D]，B=批次大小，D=特殊特征的维度
+        :param expert_params: 形状 [B, N]，B=批次大小，N=专家参数/激活权重的维度
+        :param sample_pairs_num: 采样的样本对数量，默认为批次大小的2倍（平衡效果与计算量）
+        :return: 标量，一致性Loss
+        """
+        B, _ = special_features.shape
+        sample_pairs_num = sample_pairs_num or min(2 * B, 1024)  # 限制最大采样数，避免批次过大溢出
+        
+        # 步骤1：随机生成采样的样本对索引（b1, b2）
+        b1 = torch.randint(0, B, (sample_pairs_num,), device=special_features.device)
+        b2 = torch.randint(0, B, (sample_pairs_num,), device=special_features.device)
+        
+        # 步骤2：提取对应样本对的特征和专家参数
+        f1, f2 = special_features[b1], special_features[b2]
+        p1, p2 = expert_params[b1], expert_params[b2]
+        
+        # 步骤3：计算余弦相似度（归一化后计算，避免数值规模影响）
+        # 特征余弦相似度 [sample_pairs_num]
+        sim_f = F.cosine_similarity(F.normalize(f1, dim=1), F.normalize(f2, dim=1), dim=1)
+        # 专家参数余弦相似度 [sample_pairs_num]
+        sim_p = F.cosine_similarity(F.normalize(p1, dim=1), F.normalize(p2, dim=1), dim=1)
+        
+        # 步骤4：计算MSE损失（让两种相似度尽可能接近）
+        consist_loss = F.mse_loss(sim_f, sim_p)
+        
+        return consist_loss
 
     def forward(self, x, individual=None, return_intermediates=False):
         x = x.float()
@@ -195,6 +238,7 @@ class finetuneModel(nn.Module):
         x = self.relu(x)
         batch_size, seq_len, feat_size = x.size()
         x = self.bn0(x.contiguous().view(-1, feat_size)).view(batch_size, seq_len, feat_size)
+        x = self.dropout2(x)
 
         # 4. 核心改动：多LSTM专家前向传播 + 输出融合
         expert_outputs = []
@@ -209,26 +253,32 @@ class finetuneModel(nn.Module):
             expert_cells.append(lstm_cell)
         
         # 融合策略1：平均融合（简单且稳定，推荐默认使用）
-        x = torch.stack(expert_outputs, dim=1)  # (batch, expert_num, lstm_hidden_size)
-        x = torch.mean(x, dim=1)  # (batch, lstm_hidden_size)
+        # x = torch.stack(expert_outputs, dim=1)  # (batch, expert_num, lstm_hidden_size)
+        # x = torch.mean(x, dim=1)  # (batch, lstm_hidden_size)
         
         # 【可选】融合策略2：门控加权融合（更灵活，需新增融合层）
         # 若需要加权融合，替换上面2行代码为以下内容：
-        # individual_weights = self.fusion_weights_individual(individual)  # (batch, expert_num)
-        # feature_weights = self.fusion_weights_feature(torch.mean(x, dim=1))  # (batch, expert_num)
-        # fusion_weights = (1-self.alpha) * individual_weights + self.alpha * feature_weights
-        # weights = torch.softmax(fusion_weights, dim=1)  # (batch, expert_num)
-        # x = torch.bmm(weights.unsqueeze(1), torch.stack(expert_outputs, dim=1)).squeeze(1)  # (batch, lstm_hidden_size)
+        individual_weights = self.fusion_weights_individual(individual)  # (batch, expert_num)
+        feature_weights = self.fusion_weights_feature(torch.mean(x, dim=1))  # (batch, expert_num)
+        fusion_weights = (1-self.alpha) * individual_weights + self.alpha * feature_weights
+        weights = torch.softmax(fusion_weights, dim=1)  # (batch, expert_num)
+        x = torch.bmm(weights.unsqueeze(1), torch.stack(expert_outputs, dim=1)).squeeze(1)  # (batch, lstm_hidden_size)
+        moe_load_balance_loss = self.moe_balance_loss(weights)
+        feature_expert_consist_loss = self.feature_expert_consist_loss(
+            special_features=individual,
+            expert_params=weights
+        )
 
         # 后续全连接层（保持不变）
+        x = self.dropout2(x)
         x = self.bn1(x)
         x = self.fc1(x)
         x = self.relu(x)
-        x = self.dropout(x)
+        x = self.dropout5(x)
         x = self.bn2(x)
         x = self.fc2(x)
 
         if not return_intermediates:
-            return x
+            return x, (moe_load_balance_loss, feature_expert_consist_loss)
         # 返回中间结果时，补充所有专家的隐状态/细胞状态（可选）
-        return x, tmp_out, (expert_hiddens, expert_cells)
+        return x, tmp_out, (expert_hiddens, expert_cells, moe_load_balance_loss, feature_expert_consist_loss)

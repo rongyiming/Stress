@@ -8,7 +8,7 @@ root = "D:\data\WESAD"
 
 frequency = 64  # 采样频率64Hz
 
-new_fs = 10
+new_fs = 32
 
 def interp_to_10(data):
     """

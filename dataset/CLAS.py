@@ -9,7 +9,7 @@ participants = [f"Part{x}" for x in range(1, 61)]
 
 frequency = 256  # 采样频率256Hz
 
-new_fs = 10
+new_fs = 32
 
 def interp_to_10(data):
     """
@@ -100,10 +100,13 @@ def load_data(participant, file_path=file):
         block_file = block_file_list[0]
         data = pd.read_csv(block_file)
 
-        dict['data'].append(data['ppg'].to_numpy())
-        if row['Block Type'] in ['Math Test', 'Stroop Test', 'IQ Test']:
+        
+        # if row['Block Type'] in ['Math Test', 'Stroop Test', 'IQ Test']:
+        if row['Block Type'] in ['Math Test', 'IQ Test']:
+            dict['data'].append(data['ppg'].to_numpy())
             dict['label'].append(1)
-        else:
+        elif row['Block Type'] in ['Baseline', 'Neutral']:
+            dict['data'].append(data['ppg'].to_numpy())
             dict['label'].append(0)
 
     return dict

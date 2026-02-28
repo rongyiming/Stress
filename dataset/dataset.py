@@ -14,13 +14,15 @@ from scipy.fft import fft, fftfreq
 from dataset.Feature import preprocess_ppg, calculate_ipa, calculate_sqi
 from sklearn.model_selection import train_test_split
 from dataset.individual import individual_feature_pipeline
+from dataset.individual_test import new_individual
+from numpy import polyfit
 
 class NewDataset(Dataset):
     def __init__(self, data, labels, dlabels, finetune=False, individual=None):
         self.data = torch.tensor(data)          # 数据（如：图像路径列表/NumPy数组）
         if finetune:
             self.labels = torch.tensor(labels, dtype=torch.long)   # 分类标签
-            self.individual = individual
+            self.individual = torch.tensor(individual, dtype=torch.float)
         else:
             self.labels = torch.tensor(labels, dtype=torch.float)   
             max = self.labels.max(dim=0, keepdim=True)
@@ -52,6 +54,31 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=2):
     high = highcut / nyquist
     b, a = butter(order, [low, high], btype='band')
     return filtfilt(b, a, data)  # 零相位滤波，避免相位偏移
+
+def preprocess_ppg(ppg_data, fs=32):
+    """
+    PPG数据预处理：去除基线漂移（3阶多项式拟合）
+    :param ppg_data: 输入的PPG原始数据，长度应为3840（2*60*32）
+    :param fs: 采样率，固定为32Hz
+    :return: 去基线后的PPG数据
+    """
+    # 生成时间轴
+    ppg_data = np.array(ppg_data)
+    ppg_data = butter_bandpass_filter(
+        data=ppg_data,
+        lowcut=0.5,
+        highcut=4.0,
+        fs=fs,
+        order=2
+    )
+    t = np.arange(len(ppg_data)) / fs
+    # 3阶多项式拟合基线
+    baseline = polyfit(t, ppg_data, 3)
+    baseline_curve = np.polyval(baseline, t)
+    # 去除基线漂移
+    ppg_clean = ppg_data - baseline_curve
+    return ppg_clean
+
 
 def calculate_hr_hrv(ppg_signal, fs = 10):
     """
@@ -178,7 +205,7 @@ def pre_train_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                     )
                     # segment = preprocess_ppg(np.array(segment), fs=10)
                     label = calculate_hr_hrv(np.array(segment), fs=frequency)
-                    dlabel = j[k + length: k + length + frequency]
+                    dlabel = segment
                     if label['heart_rate'] is not None and label['heart_rate'] > 40 / 60 * T:
                         # print(f"CLAS 心率: {label['heart_rate']} 次/分")
                         new_data.append(segment)
@@ -207,7 +234,7 @@ def pre_train_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                     )
                     # segment = preprocess_ppg(np.array(segment), fs=10)
                     label = calculate_hr_hrv(np.array(segment), fs=frequency)
-                    dlabel = j[k + length: k + length + frequency]
+                    dlabel = segment
                     if label['heart_rate'] is not None and label['heart_rate'] > 40 / 60 * T:
                         # print(f"WESAD 心率: {label['heart_rate']} 次/分")
                         new_data.append(segment)
@@ -236,7 +263,7 @@ def pre_train_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                     )
                     # segment = preprocess_ppg(np.array(segment), fs=10)
                     label = calculate_hr_hrv(np.array(segment), fs=frequency)
-                    dlabel = j[k + length: k + length + frequency]
+                    dlabel = segment
                     cnt1 += 1
                     if label['heart_rate'] is not None and label['heart_rate'] > 40 / 60 * T:
                         # print(f"MTSPD 心率: {label['heart_rate']} 次/分")
@@ -259,7 +286,12 @@ def pretrain_create_dataloader(batch_size=32, T = 10, frequency = 32, overlap = 
     data, labels, dlabels = pre_train_dataset(T=T, frequency=frequency, overlap=overlap, datasets=datasets)
     print(f"数据总量: {len(data)}, 标签总量: {len(labels)}")
     std_per_type = np.std(labels, axis=0, ddof=0)
+
+
     dataset = NewDataset(data, labels, dlabels)
+    
+    # individual = calculate_individual(dlabels, frequency=frequency)
+    # dataset = NewDataset(data, individual, dlabels)
 
     train_size = int(len(data) * train_proportion)
     test_size = int(len(data) * test_proportion)
@@ -290,18 +322,15 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
             'original_data': []
         }
         for i in clas_data:
-            # print(f"CLAS 参与者 {i} 的数据块数量: {len(clas_data[i]['data'])}")
+            print(f"CLAS 参与者 {i} 的数据块数量: {len(clas_data[i]['data'])}")
             for j in range(len(clas_data[i]['data'])):
                 data = clas_data[i]['data'][j]
                 labels = clas_data[i]['label'][j]
                 for k in range(0, len(data) - length - frequency + 1, int(step)):
                     segment = data[k:k + length]
-                    segment = butter_bandpass_filter(
-                        data=segment,
-                        lowcut=0.5,
-                        highcut=4.0,
-                        fs=frequency,
-                        order=2
+                    segment = preprocess_ppg(
+                        ppg_data=segment,
+                        fs=frequency
                     )
                     label = calculate_hr_hrv(np.array(segment), fs=frequency)
                     dlabel = data[k + length: k + length + frequency]
@@ -311,7 +340,12 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                         clas['data'].append(segment)
                         clas['label'].append(labels)
                         clas['dlabel'].append(dlabel)
-                        clas['original_data'].append(clas_data[i]['data'][0][-min(1920, len(clas_data[i]['data'][0])):])
+                        individual_data = clas_data[i]['data'][0][-min(3840, len(clas_data[i]['data'][0])):]
+                        individual_data = preprocess_ppg(
+                            ppg_data=individual_data,
+                            fs=frequency
+                        )
+                        clas['original_data'].append(individual_data)
                         if labels == 0:
                             cntl0 += 1
         print(cntl0)
@@ -335,12 +369,9 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                 labels = wesad_data[i]['label'][j]
                 for k in range(0, len(data) - length - frequency + 1, int(step)):
                     segment = data[k:k + length]
-                    segment = butter_bandpass_filter(
-                        data=segment,
-                        lowcut=0.5,
-                        highcut=4.0,
-                        fs=frequency,
-                        order=2
+                    segment = preprocess_ppg(
+                        ppg_data=segment,
+                        fs=frequency
                     )
                     label = calculate_hr_hrv(np.array(segment), fs=frequency)
                     dlabel = data[k + length: k + length + frequency]
@@ -350,7 +381,12 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                         wesad['data'].append(segment)
                         wesad['label'].append(labels)
                         wesad['dlabel'].append(dlabel)
-                        wesad['original_data'].append(wesad_data[i]['data'][0][-min(1920, len(wesad_data[i]['data'][0])):])
+                        individual_data = wesad_data[i]['data'][0][-min(3840, len(wesad_data[i]['data'][0])):]
+                        individual_data = preprocess_ppg(
+                            ppg_data=individual_data,
+                            fs=frequency
+                        )
+                        wesad['original_data'].append(individual_data)
                         if labels == 0:
                             cntl0 += 1
         print(cntl0)
@@ -403,11 +439,12 @@ def build_dataset(df, ids):
 def calculate_individual(original_data, frequency=10):
     individuals = []
     for data in original_data:
-        individual, feature_names = individual_feature_pipeline(data, fs=frequency)
+        # individual, feature_names = individual_feature_pipeline(data, fs=frequency)
+        individual = new_individual(data, fs=frequency)
         individuals.append(individual)
     return individuals
 
-def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.1, worker_init_fn=None):
+def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
     """
     创建DataLoader
     """
@@ -415,7 +452,7 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
     dataloader_list = []
     for dataset in dataset_list:
         ids = dataset['ID']
-        unique_ids = list(set(ids))
+        unique_ids = list(dict.fromkeys(ids))
         data = dataset['data']
         labels = dataset['label']
         dlabels = dataset['dlabel']
@@ -437,6 +474,7 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
         train_ids = unique_ids[: train_idsize]
         test_ids = unique_ids[train_idsize: train_idsize + test_idsize]
         val_ids = unique_ids[train_idsize + test_idsize:]
+        print(f"训练集ID: {train_ids}, 测试集ID: {test_ids}, 验证集ID: {val_ids}")
         df = pd.DataFrame(
             {
                 'id': ids,

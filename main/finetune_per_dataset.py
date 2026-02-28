@@ -53,7 +53,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="模型进行时间序列预训练")
     parser.add_argument('--epochs', type=int, default=1000, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
-    parser.add_argument('--learning_rate', type=float, default=0.0003, help='学习率')
+    parser.add_argument('--learning_rate', type=float, default=0.00001, help='学习率')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='计算设备')
     parser.add_argument('--label', type=int, default=-1, help='预训练标签类型')
@@ -64,6 +64,8 @@ def parse_args():
     parser.add_argument('--overlap', type=float, default=0.5)
     parser.add_argument('--resnet_depth', type=int, default=18, help='ResNet深度选择: 18, 34, 50')
     parser.add_argument('--frequency', type=int, default=32, help='数据采样频率')
+    parser.add_argument('--lambda1', type=float, default=0.1, help='MoE负载均衡Loss权重')
+    parser.add_argument('--lambda2', type=float, default=0.01, help='特征-参数一致性Loss权重')
     return parser.parse_args()
 
 def freeze_resnet_except_layer2(model):
@@ -110,7 +112,8 @@ if __name__ == "__main__":
     model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    # optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.999),  weight_decay=1e-3)
 
     pretrain_model = pretrainModel(input_channels=1, resnet_depth=args.resnet_depth, hidden_size=64, output_size=len(chosenlabels))
 
@@ -133,35 +136,46 @@ if __name__ == "__main__":
         losscnt = 0
         model_path = f'./save/finetune/{args.model_name}_{args.resnet_depth}_{dataset_name}_{args.datalength}_label{args.label}_finetune.pth'
         model.load_state_dict(resnet_pretrain_params, strict=False)
-        # model.finetune()
+        model.finetune()
 
         for epoch in range(args.epochs):
             model.train()
             running_loss = 0.0
+            c_loss = 0.0
+            moe_loss = 0.0
+            consist_loss = 0.0
             start_time = time.time()
 
             for inputs, labels, _, individual in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}"):
                 inputs, labels, individual = inputs.to(device), labels.to(device), individual.to(device)
                 optimizer.zero_grad()
-                outputs = model(inputs, individual=individual)
+                outputs, (loss1, loss2) = model(inputs, individual=individual)
                 if outputs.size(0) != labels.size(0):
                     quit("输出和标签的批次大小不匹配！")
-                loss = criterion(outputs, labels)
+                crossEloss = criterion(outputs, labels)
+                loss = crossEloss + args.lambda1 * loss1 + args.lambda2 * loss2
                 loss.backward()
                 optimizer.step()
 
                 running_loss += loss.item() * inputs.size(0)
+                c_loss += crossEloss.item() * inputs.size(0)
+                moe_loss += loss1.item() * inputs.size(0)
+                consist_loss += loss2.item() * inputs.size(0)
 
-            epoch_loss = running_loss / len(train_loader.dataset)
+            length = len(train_loader.dataset)
+            epoch_loss = running_loss / length
+            ec_loss = c_loss / length
+            em_loss = moe_loss / length
+            econsist_loss = consist_loss / length
             elapsed_time = time.time() - start_time
-            print(f"Epoch {epoch+1}/{args.epochs}, Loss: {epoch_loss:.4f}, Time: {elapsed_time:.2f}s")
+            print(f"Epoch {epoch+1}/{args.epochs}, Cross entropy Loss: {ec_loss:.4f}, Moe Loss: {em_loss:.4f}, Consist Loss: {econsist_loss:.4f}, Time: {elapsed_time:.2f}s")
             # 评估模型在验证集上的表现
             model.eval()
             val_losses = 0.0
             with torch.no_grad():
                 for val_inputs, val_labels, _, val_individual in val_loader:
                     val_inputs, val_labels, val_individual = val_inputs.to(device), val_labels.to(device), val_individual.to(device)
-                    val_outputs = model(val_inputs, individual=val_individual)
+                    val_outputs, _ = model(val_inputs, individual=val_individual)
                     val_loss = criterion(val_outputs, val_labels)
                     val_losses += val_loss.item() * val_inputs.size(0)
 
@@ -190,7 +204,7 @@ if __name__ == "__main__":
                 for test_inputs, test_labels, _, test_individual in test_loader:
 
                     test_inputs, test_labels, test_individual = test_inputs.to(device), test_labels.to(device), test_individual.to(device)
-                    test_outputs = model(test_inputs, individual=test_individual)
+                    test_outputs, _ = model(test_inputs, individual=test_individual)
                     test_loss = criterion(test_outputs, test_labels)
                     test_losses += test_loss.item() * test_inputs.size(0)
 
