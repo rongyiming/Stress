@@ -435,13 +435,27 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
 def build_dataset(df, ids):
     newdf = df[df['id'].isin(ids)]
     return NewDataset(newdf['data'].tolist(), newdf['labels'].tolist(), newdf['dlabels'].tolist(), finetune=True, individual=newdf['individual'].tolist())
-    
+
+def normalize(individuals):
+    # 将每个特征维度的值缩放到0-1范围内
+    all_features = np.array(individuals)
+    min_vals = np.min(all_features, axis=0)
+    max_vals = np.max(all_features, axis=0)
+    for i in range(len(individuals)):
+        for j in range(len(individuals[i])):
+            if max_vals[j] - min_vals[j] > 0:
+                individuals[i][j] = (individuals[i][j] - min_vals[j]) / (max_vals[j] - min_vals[j])
+            else:
+                individuals[i][j] = 0.0  # 如果所有值相同，直接设置为0
+    return individuals
+
 def calculate_individual(original_data, frequency=10):
     individuals = []
     for data in original_data:
         # individual, feature_names = individual_feature_pipeline(data, fs=frequency)
         individual = new_individual(data, fs=frequency)
         individuals.append(individual)
+    individuals = normalize(individuals)
     return individuals
 
 def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):

@@ -135,7 +135,7 @@ class finetuneModel(nn.Module):
         else:
             raise ValueError("Unsupported ResNet depth. Choose from 18, 34, or 50.")
         self.alpha = alpha
-        self.individual_size = 12
+        self.individual_size = 10
         self.resnet_outpusize = 512
         self.linear = nn.Linear(self.resnet_outpusize, lstm_input_size)
         self.bn0 = nn.BatchNorm1d(lstm_input_size)
