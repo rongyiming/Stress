@@ -64,8 +64,8 @@ def parse_args():
     parser.add_argument('--overlap', type=float, default=0.5)
     parser.add_argument('--resnet_depth', type=int, default=18, help='ResNet深度选择: 18, 34, 50')
     parser.add_argument('--frequency', type=int, default=32, help='数据采样频率')
-    parser.add_argument('--lambda1', type=float, default=0.1, help='MoE负载均衡Loss权重')
-    parser.add_argument('--lambda2', type=float, default=0.01, help='特征-参数一致性Loss权重')
+    parser.add_argument('--lambda1', type=float, default=0.01, help='MoE负载均衡Loss权重')
+    parser.add_argument('--lambda2', type=float, default=0.5, help='特征-参数一致性Loss权重')
     return parser.parse_args()
 
 def freeze_resnet_except_layer2(model):
@@ -97,6 +97,8 @@ def freeze_resnet_except_layer2(model):
 if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
+    with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
+        f.write(f"lambda1:{args.lambda1};lambda2:{args.lambda2}\n")
 
     if not args.label == -1:
         chosenlabels = [args.label]
@@ -106,8 +108,11 @@ if __name__ == "__main__":
     # 创建数据加载器
     datasetlist = finetune_pd_create_dataloader(batch_size=args.batch_size, T=args.datalength, frequency=args.frequency, overlap=args.overlap, datasets=args.dataset)
 
+    alpha = 0.6  # 融合权重，控制个体特征和输入特征的融合比例，范围[0,1]，可调节以优化性能
+    with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
+        f.write(f"alpha:{alpha}\n")
     # 初始化模型、损失函数和优化器
-    model = finetuneModel(input_channels=1, resnet_depth=args.resnet_depth, lstm_input_size=256, lstm_hidden_size=64, lstm_num_layers=1, output_size=2, expert_num=10, alpha=0.2)
+    model = finetuneModel(input_channels=1, resnet_depth=args.resnet_depth, lstm_input_size=256, lstm_hidden_size=64, lstm_num_layers=1, output_size=2, expert_num=10, alpha=alpha)
 
     model.to(device)
 
@@ -186,7 +191,7 @@ if __name__ == "__main__":
                 best_val_loss = val_loss_epoch
                 torch.save(model.state_dict(), model_path)
                 losscnt = 0
-            elif losscnt > 20:
+            elif losscnt > 50:
                 print("验证损失未降低，提前停止训练。")
                 break
 
@@ -227,4 +232,12 @@ if __name__ == "__main__":
             print(f"Precision: {precision:.4f}")
             print(f"Recall: {recall:.4f}")
             print(f"F1: {f1:.4f}")
-        
+
+            with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
+                f.write(f"train:{dataset_name};test:{dataset_name2}\n")
+                f.write("混淆矩阵：\n")
+                f.write(str(cm) + "\n")
+                f.write(f"Accuracy:{accuracy:.4f}\n")
+                f.write(f"Precision: {precision:.4f}\n")
+                f.write(f"Recall: {recall:.4f}\n")
+                f.write(f"F1: {f1:.4f}\n\n")

@@ -185,15 +185,16 @@ class finetuneModel(nn.Module):
     
     def moe_balance_loss(self,expert_weights):
         """
-        计算MOE专家负载均衡Loss（方差形式，高效）
-        :param expert_weights: 形状 [B, N]，B=批次大小，N=专家数量
-        :return: 标量，均衡Loss
+        计算 MoE 负载均衡损失（标准 Switch Transformer 风格）
+        :param expert_weights: 形状 [B, N]，每个样本对各专家的权重（softmax 后）
+        :return: 标量损失
         """
-        # 步骤1：计算每个专家在批次内的平均激活值 [N]
-        expert_avg = torch.mean(expert_weights, dim=0)
-        # 步骤2：计算方差（方差越小，负载越均衡）
-        expert_var = torch.var(expert_avg, unbiased=False)
-        return expert_var
+        num_experts = expert_weights.size(1)
+        # 每个专家在 batch 上的平均权重（即 f_i 和 p_i）
+        avg_weights = torch.mean(expert_weights, dim=0)  # [N]
+        # 损失 = N * sum(avg_weights^2)
+        loss = num_experts * torch.sum(avg_weights ** 2)
+        return loss
 
     def feature_expert_consist_loss(self, special_features, expert_params, sample_pairs_num=None):
         """
@@ -255,6 +256,8 @@ class finetuneModel(nn.Module):
         # 融合策略1：平均融合（简单且稳定，推荐默认使用）
         # x = torch.stack(expert_outputs, dim=1)  # (batch, expert_num, lstm_hidden_size)
         # x = torch.mean(x, dim=1)  # (batch, lstm_hidden_size)
+        # moe_load_balance_loss = torch.tensor(0.0, device=x.device)  # 平均融合不计算负载均衡Loss
+        # feature_expert_consist_loss = torch.tensor(0.0, device=x.device)
         
         # 【可选】融合策略2：门控加权融合（更灵活，需新增融合层）
         # 若需要加权融合，替换上面2行代码为以下内容：
@@ -268,6 +271,9 @@ class finetuneModel(nn.Module):
             special_features=individual,
             expert_params=weights
         )
+        
+        feature_expert_consist_loss = torch.tensor(0.0, device=x.device)
+        # moe_load_balance_loss = torch.tensor(0.0, device=x.device)
 
         # 后续全连接层（保持不变）
         x = self.dropout2(x)
