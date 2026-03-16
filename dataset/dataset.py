@@ -290,8 +290,8 @@ def pretrain_create_dataloader(batch_size=32, T = 10, frequency = 32, overlap = 
 
     dataset = NewDataset(data, labels, dlabels)
     
-    # individual = calculate_individual(dlabels, frequency=frequency)
-    # dataset = NewDataset(data, individual, dlabels)
+    individual = calculate_individual(dlabels, frequency=frequency)
+    dataset = NewDataset(data, individual, dlabels)
 
     train_size = int(len(data) * train_proportion)
     test_size = int(len(data) * test_proportion)
@@ -323,6 +323,12 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
         }
         for i in clas_data:
             print(f"CLAS 参与者 {i} 的数据块数量: {len(clas_data[i]['data'])}")
+            labelslength = [0, 0]
+            for j in range(len(clas_data[i]['data'])):
+                data = clas_data[i]['data'][j]
+                labels = clas_data[i]['label'][j]
+                labelslength[labels] += len(data)
+            
             for j in range(len(clas_data[i]['data'])):
                 data = clas_data[i]['data'][j]
                 labels = clas_data[i]['label'][j]
@@ -458,10 +464,7 @@ def calculate_individual(original_data, frequency=10):
     individuals = normalize(individuals)
     return individuals
 
-def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
-    """
-    创建DataLoader
-    """
+def finetune_create_dataset(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
     dataset_list = finetune_per_dataset(T=T, frequency=frequency, overlap=overlap, datasets=datasets)
     dataloader_list = []
     for dataset in dataset_list:
@@ -510,11 +513,17 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, worker_init_fn=worker_init_fn)
 
         dataloader_list.append((dataset['name'], train_loader, val_loader, test_loader))
+    with open(f'./dataset/finetune_dataset.pkl', 'wb') as f:
+        pickle.dump(dataloader_list, f)
 
+def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
+    with open(f'./dataset/finetune_dataset.pkl', "rb") as f:
+        dataloader_list = pickle.load(f)
     return dataloader_list
 
 if __name__ == "__main__":
-    clas_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/CLAS.pkl")
-    wesad_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/WESAD.pkl")
-    mtspd_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/MTSPD.pkl")
-    pre_train_data = pre_train_dataset(T=10, overlap=0.5)
+    finetune_create_dataset(batch_size=64, T=10, frequency=32, overlap=0.5, datasets=['CLAS', 'WESAD'])
+    # clas_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/CLAS.pkl")
+    # wesad_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/WESAD.pkl")
+    # mtspd_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/MTSPD.pkl")
+    # pre_train_data = pre_train_dataset(T=10, overlap=0.5)

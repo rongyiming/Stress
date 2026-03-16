@@ -36,7 +36,7 @@ def set_seed(seed=42):
 ALL_DATASETS = ['CLAS', 'WESAD', 'MTSPD']
 DATASETS = ['CLAS', 'WESAD']
 
-chosenlabels = [0, 1, 5]
+chosenlabels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="模型进行时间序列预训练")
@@ -193,7 +193,7 @@ if __name__ == "__main__":
             best_val_loss = val_loss_epoch
             torch.save(model.state_dict(), model_path)
             losscnt = 0
-        elif losscnt > 10:
+        elif losscnt > 10 and running_loss < best_val_loss:
             print("验证损失未降低，提前停止训练。")
             break
         losscnt += 1

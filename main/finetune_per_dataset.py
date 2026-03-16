@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from dataset.dataset import finetune_pd_create_dataloader
+from dataset.dataset import finetune_pd_create_dataloader, NewDataset
 from main.model import ResLSTMModel, finetuneModel, pretrainModel
 import random
 import numpy as np
@@ -15,7 +15,6 @@ from sklearn.metrics import precision_score, recall_score, f1_score, confusion_m
 import torch.nn.init as init
 
 local_now = datetime.now()
-
 
 # 初始化输出层的权重和偏置
 def init_output_layer(layer):
@@ -47,7 +46,7 @@ def set_seed(seed=1024):
 ALL_DATASETS = ['CLAS', 'WESAD', 'MTSPD']
 DATASETS = ['CLAS', 'WESAD']
 
-chosenlabels = [0, 1, 5]
+chosenlabels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 def parse_args():
     parser = argparse.ArgumentParser(description="模型进行时间序列预训练")
@@ -66,6 +65,7 @@ def parse_args():
     parser.add_argument('--frequency', type=int, default=32, help='数据采样频率')
     parser.add_argument('--lambda1', type=float, default=0.01, help='MoE负载均衡Loss权重')
     parser.add_argument('--lambda2', type=float, default=0.5, help='特征-参数一致性Loss权重')
+    parser.add_argument('--alpha', type=float, default=0.6, help='融合权重')
     return parser.parse_args()
 
 def freeze_resnet_except_layer2(model):
@@ -108,7 +108,7 @@ if __name__ == "__main__":
     # 创建数据加载器
     datasetlist = finetune_pd_create_dataloader(batch_size=args.batch_size, T=args.datalength, frequency=args.frequency, overlap=args.overlap, datasets=args.dataset)
 
-    alpha = 0.6  # 融合权重，控制个体特征和输入特征的融合比例，范围[0,1]，可调节以优化性能
+    alpha = args.alpha  # 融合权重，控制个体特征和输入特征的融合比例，范围[0,1]，可调节以优化性能
     with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
         f.write(f"alpha:{alpha}\n")
     # 初始化模型、损失函数和优化器
@@ -141,7 +141,7 @@ if __name__ == "__main__":
         losscnt = 0
         model_path = f'./save/finetune/{args.model_name}_{args.resnet_depth}_{dataset_name}_{args.datalength}_label{args.label}_finetune.pth'
         model.load_state_dict(resnet_pretrain_params, strict=False)
-        model.finetune()
+        # model.finetune()
 
         for epoch in range(args.epochs):
             model.train()
