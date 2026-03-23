@@ -261,8 +261,8 @@ class finetuneModel(nn.Module):
         
         # 【可选】融合策略2：门控加权融合（更灵活，需新增融合层）
         # 若需要加权融合，替换上面2行代码为以下内容：
-        individual_weights = self.fusion_weights_individual(individual)  # (batch, expert_num)
-        feature_weights = self.fusion_weights_feature(torch.mean(x, dim=1))  # (batch, expert_num)
+        individual_weights = torch.softmax(self.fusion_weights_individual(individual), dim = 1)  # (batch, expert_num)
+        feature_weights = torch.softmax(self.fusion_weights_feature(torch.mean(x, dim=1)), dim = 1)  # (batch, expert_num)
         fusion_weights = (1-self.alpha) * individual_weights + self.alpha * feature_weights
         weights = torch.softmax(fusion_weights, dim=1)  # (batch, expert_num)
         x = torch.bmm(weights.unsqueeze(1), torch.stack(expert_outputs, dim=1)).squeeze(1)  # (batch, lstm_hidden_size)
@@ -272,7 +272,7 @@ class finetuneModel(nn.Module):
             expert_params=weights
         )
         
-        feature_expert_consist_loss = torch.tensor(0.0, device=x.device)
+        # feature_expert_consist_loss = torch.tensor(0.0, device=x.device)
         # moe_load_balance_loss = torch.tensor(0.0, device=x.device)
 
         # 后续全连接层（保持不变）

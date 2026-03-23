@@ -13,6 +13,7 @@ import time  # 用于计算训练时间
 from datetime import datetime
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, accuracy_score
 import torch.nn.init as init
+import time
 
 local_now = datetime.now()
 
@@ -52,7 +53,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="模型进行时间序列预训练")
     parser.add_argument('--epochs', type=int, default=1000, help='训练轮数')
     parser.add_argument('--batch_size', type=int, default=64, help='批次大小')
-    parser.add_argument('--learning_rate', type=float, default=0.00001, help='学习率')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='学习率')
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='计算设备')
     parser.add_argument('--label', type=int, default=-1, help='预训练标签类型')
@@ -63,9 +64,10 @@ def parse_args():
     parser.add_argument('--overlap', type=float, default=0.5)
     parser.add_argument('--resnet_depth', type=int, default=18, help='ResNet深度选择: 18, 34, 50')
     parser.add_argument('--frequency', type=int, default=32, help='数据采样频率')
-    parser.add_argument('--lambda1', type=float, default=0.01, help='MoE负载均衡Loss权重')
+    parser.add_argument('--lambda1', type=float, default=0.05, help='MoE负载均衡Loss权重')
     parser.add_argument('--lambda2', type=float, default=0.5, help='特征-参数一致性Loss权重')
-    parser.add_argument('--alpha', type=float, default=0.6, help='融合权重')
+    parser.add_argument('--alpha', type=float, default=0.3, help='融合权重')
+    parser.add_argument('--pretrain_used', type=bool, default=True, help='是否使用预训练模型的ResNet参数')
     return parser.parse_args()
 
 def freeze_resnet_except_layer2(model):
@@ -95,6 +97,7 @@ def freeze_resnet_except_layer2(model):
         param.requires_grad = True
 
 if __name__ == "__main__":
+    start_time = time.time()
     args = parse_args()
     set_seed(args.seed)
     with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
@@ -141,7 +144,8 @@ if __name__ == "__main__":
         losscnt = 0
         model_path = f'./save/finetune/{args.model_name}_{args.resnet_depth}_{dataset_name}_{args.datalength}_label{args.label}_finetune.pth'
         model.load_state_dict(resnet_pretrain_params, strict=False)
-        # model.finetune()
+        if args.pretrain_used:    
+            model.finetune()
 
         for epoch in range(args.epochs):
             model.train()
@@ -191,13 +195,15 @@ if __name__ == "__main__":
                 best_val_loss = val_loss_epoch
                 torch.save(model.state_dict(), model_path)
                 losscnt = 0
-            elif losscnt > 50:
+            elif losscnt > 20:
                 print("验证损失未降低，提前停止训练。")
                 break
 
         print("训练完成！")
         print(f"模型已保存到 {model_path}")
         for dataset_name2, train_loader, val_loader, test_loader in datasetlist:
+            if dataset_name2 != dataset_name:
+                continue
             # 在测试集上评估模型
             model.eval()
             test_losses = 0.0
@@ -241,3 +247,6 @@ if __name__ == "__main__":
                 f.write(f"Precision: {precision:.4f}\n")
                 f.write(f"Recall: {recall:.4f}\n")
                 f.write(f"F1: {f1:.4f}\n\n")
+    end_time = time.time()
+    print(start_time, end_time)
+    print(f"总训练时间: {end_time - start_time:.2f}s")

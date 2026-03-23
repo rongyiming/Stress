@@ -328,11 +328,13 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
                 data = clas_data[i]['data'][j]
                 labels = clas_data[i]['label'][j]
                 labelslength[labels] += len(data)
-            
+            print(f"CLAS 参与者 {i} 的标签分布: {labelslength}")
+            N = 1+(labelslength[0] + labelslength[1] - 640)/320
+            steps = [(labelslength[0]-320)/(N-1), (labelslength[1]-320)/(N-1)]
             for j in range(len(clas_data[i]['data'])):
                 data = clas_data[i]['data'][j]
                 labels = clas_data[i]['label'][j]
-                for k in range(0, len(data) - length - frequency + 1, int(step)):
+                for k in range(0, len(data) - length - frequency + 1, int(steps[labels])):
                     segment = data[k:k + length]
                     segment = preprocess_ppg(
                         ppg_data=segment,
@@ -370,10 +372,18 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
         }
         for i in wesad_data:
             print(f"WESAD 参与者 {i} 的数据块数量: {len(wesad_data[i]['data'])}")
+            labelslength = [0, 0]
             for j in range(len(wesad_data[i]['data'])):
                 data = wesad_data[i]['data'][j]
                 labels = wesad_data[i]['label'][j]
-                for k in range(0, len(data) - length - frequency + 1, int(step)):
+                labelslength[labels] += len(data)
+            print(f"WESAD 参与者 {i} 的标签分布: {labelslength}")
+            N = 1+(labelslength[0] + labelslength[1] - 640)/320
+            steps = [(labelslength[0]-320)/(N-1), (labelslength[1]-320)/(N-1)]
+            for j in range(len(wesad_data[i]['data'])):
+                data = wesad_data[i]['data'][j]
+                labels = wesad_data[i]['label'][j]
+                for k in range(0, len(data) - length - frequency + 1, int(steps[labels])):
                     segment = data[k:k + length]
                     segment = preprocess_ppg(
                         ppg_data=segment,
@@ -465,9 +475,11 @@ def calculate_individual(original_data, frequency=10):
     return individuals
 
 def finetune_create_dataset(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
+    dataset = ['CLAS', 'WESAD']
     dataset_list = finetune_per_dataset(T=T, frequency=frequency, overlap=overlap, datasets=datasets)
     dataloader_list = []
     for dataset in dataset_list:
+        print(f"处理数据集: {dataset['name']}")
         ids = dataset['ID']
         unique_ids = list(dict.fromkeys(ids))
         data = dataset['data']
