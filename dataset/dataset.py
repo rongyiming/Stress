@@ -16,6 +16,7 @@ from sklearn.model_selection import train_test_split
 from dataset.individual import individual_feature_pipeline
 from dataset.individual_test import new_individual
 from numpy import polyfit
+from tqdm import tqdm
 
 class NewDataset(Dataset):
     def __init__(self, data, labels, dlabels, finetune=False, individual=None):
@@ -359,6 +360,57 @@ def finetune_per_dataset(T = 10, frequency=32, overlap = 0.5, datasets=None):
         print(cntl0)
         print(len(clas['data']))
         new_data.append(clas)
+
+    if 'CATSA' in datasets:
+        catsa_data = load_dataset(f"C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/CATSA_{frequency}Hz.pkl")
+        cntl0 = 0
+        catsa = {
+            'name': 'CATSA',
+            'ID':[],
+            'data': [],
+            'label': [],
+            'dlabel': [],
+            'original_data': []
+        }
+        for i in catsa_data:
+            print(f"CATSA 参与者 {i} 的数据块数量: {len(catsa_data[i]['data'])}")
+            labelslength = [0, 0]
+            for j in range(len(catsa_data[i]['data'])):
+                data = catsa_data[i]['data'][j]
+                labels = catsa_data[i]['label'][j]
+                labelslength[labels] += len(data)
+            print(f"CATSA 参与者 {i} 的标签分布: {labelslength}")
+            N = 1+(labelslength[0] + labelslength[1] - 640)/320
+            steps = [(labelslength[0]-320)/(N-1), (labelslength[1]-320)/(N-1)]
+            for j in range(len(catsa_data[i]['data'])):
+                data = catsa_data[i]['data'][j]
+                labels = catsa_data[i]['label'][j]
+                for k in range(0, len(data) - length - frequency + 1, int(steps[labels])):
+                    segment = data[k:k + length]
+                    segment = preprocess_ppg(
+                        ppg_data=segment,
+                        fs=frequency
+                    )
+                    label = calculate_hr_hrv(np.array(segment), fs=frequency)
+                    dlabel = data[k + length: k + length + frequency]
+                    if label['heart_rate'] is not None and label['heart_rate'] > 40 / 60 * T:
+                        # print(f"CATSA 心率: {label['heart_rate']} 次/分")
+                        catsa['ID'].append(i)
+                        catsa['data'].append(segment)
+                        catsa['label'].append(labels)
+                        catsa['dlabel'].append(dlabel)
+                        individual_data = catsa_data[i]['data'][0][-min(3840, len(catsa_data[i]['data'][0])):]
+                        individual_data = preprocess_ppg(
+                            ppg_data=individual_data,
+                            fs=frequency
+                        )
+                        catsa['original_data'].append(individual_data)
+                        if labels == 0:
+                            cntl0 += 1
+        print(cntl0)
+        print(len(catsa['data']))
+        new_data.append(catsa)
+
     if 'WESAD' in datasets:
         wesad_data = load_dataset(f"C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/WESAD_{frequency}Hz.pkl")
         cntl0 = 0
@@ -475,7 +527,6 @@ def calculate_individual(original_data, frequency=10):
     return individuals
 
 def finetune_create_dataset(batch_size=32, T=10, frequency=10, overlap=0.5, datasets=None, shuffle=True, num_workers=0, train_proportion=0.7, test_proportion=0.15, worker_init_fn=None):
-    dataset = ['CLAS', 'WESAD']
     dataset_list = finetune_per_dataset(T=T, frequency=frequency, overlap=overlap, datasets=datasets)
     dataloader_list = []
     for dataset in dataset_list:
@@ -533,8 +584,90 @@ def finetune_pd_create_dataloader(batch_size=32, T=10, frequency=10, overlap=0.5
         dataloader_list = pickle.load(f)
     return dataloader_list
 
+def extract_and_save_common_pkl(
+    input_pkl_path="./dataset/finetune_dataset.pkl",
+    output_pkl_path="./dataset/finetune_dataset_common.pkl"
+):
+    """
+    提取PyTorch DataLoader中的数据，转换为NumPy格式并保存
+    
+    Args:
+        input_pkl_path: 原始PyTorch DataLoader的pkl文件路径
+        output_pkl_path: 输出通用格式pkl的路径
+    """
+    # 1. 加载原始pkl文件
+    print(f"正在加载原始pkl文件：{input_pkl_path}")
+    try:
+        with open(input_pkl_path, 'rb') as f:
+            dataloader_list = pickle.load(f)
+        print(f"成功加载，数据列表长度：{len(dataloader_list)}")
+    except Exception as e:
+        raise RuntimeError(f"加载原始pkl失败：{e}")
+
+    # 2. 遍历解析每个数据集的train/val/test loader
+    common_data = []
+    for idx, (dataset_name, train_loader, val_loader, test_loader) in enumerate(dataloader_list):
+        print(f"\n处理第{idx+1}个数据集：{dataset_name}")
+        
+        # 定义数据提取函数（复用逻辑）
+        def extract_loader_data(loader, loader_name):
+            """提取单个DataLoader的所有数据"""
+            data_list = []
+            label_list = []
+            print(f"  解析{loader_name}数据...")
+            
+            # 迭代DataLoader（处理多进程/多线程加载）
+            for batch in tqdm(loader, desc=f"    读取{loader_name}批次"):
+                # 分离数据和标签（兼容常见的 (data, label) 格式）
+                batch_data = batch[0] if isinstance(batch, (list, tuple)) else batch
+                batch_label = batch[1] if isinstance(batch, (list, tuple)) and len(batch)>=2 else None
+                
+                # PyTorch张量转NumPy（处理CUDA/CPU张量）
+                np_data = batch_data.cpu().detach().numpy() if torch.is_tensor(batch_data) else np.array(batch_data)
+                
+                if batch_label is not None:
+                    np_label = batch_label.cpu().detach().numpy() if torch.is_tensor(batch_label) else np.array(batch_label)
+                    label_list.append(np_label)
+                
+                data_list.append(np_data)
+            
+            # 合并所有批次
+            combined_data = np.concatenate(data_list, axis=0)
+            combined_label = np.concatenate(label_list, axis=0) if label_list else None
+            
+            return {
+                "data": combined_data,
+                "labels": combined_label,
+                "sample_num": combined_data.shape[0],
+                "feature_shape": combined_data.shape[1:]
+            }
+        
+        # 提取train/val/test数据
+        train_data = extract_loader_data(train_loader, "训练集")
+        val_data = extract_loader_data(val_loader, "验证集")
+        test_data = extract_loader_data(test_loader, "测试集")
+        
+        # 保存当前数据集信息
+        common_data.append({
+            "dataset_name": dataset_name,
+            "train": train_data,
+            "val": val_data,
+            "test": test_data
+        })
+    
+    # 3. 保存通用格式pkl
+    print(f"\n保存通用格式pkl文件：{output_pkl_path}")
+    try:
+        with open(output_pkl_path, 'wb') as f:
+            # 使用protocol=4兼容更多Python版本
+            pickle.dump(common_data, f, protocol=4)
+        print("保存成功！")
+    except Exception as e:
+        raise RuntimeError(f"保存通用pkl失败：{e}")
+
 if __name__ == "__main__":
-    finetune_create_dataset(batch_size=64, T=10, frequency=32, overlap=0.5, datasets=['CLAS', 'WESAD'])
+    # extract_and_save_common_pkl()
+    finetune_create_dataset(batch_size=64, T=10, frequency=32, overlap=0.5, datasets=['CLAS', 'WESAD','CATSA'])
     # clas_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/CLAS.pkl")
     # wesad_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/WESAD.pkl")
     # mtspd_data = load_dataset("C:/Users/12992/Desktop/实验室/stress_pretrain/dataset/MTSPD.pkl")

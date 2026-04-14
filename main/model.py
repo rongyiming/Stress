@@ -259,7 +259,7 @@ class finetuneModel(nn.Module):
         # moe_load_balance_loss = torch.tensor(0.0, device=x.device)  # 平均融合不计算负载均衡Loss
         # feature_expert_consist_loss = torch.tensor(0.0, device=x.device)
         
-        # 【可选】融合策略2：门控加权融合（更灵活，需新增融合层）
+        # 融合策略2：门控加权融合（更灵活，需新增融合层）
         # 若需要加权融合，替换上面2行代码为以下内容：
         individual_weights = torch.softmax(self.fusion_weights_individual(individual), dim = 1)  # (batch, expert_num)
         feature_weights = torch.softmax(self.fusion_weights_feature(torch.mean(x, dim=1)), dim = 1)  # (batch, expert_num)

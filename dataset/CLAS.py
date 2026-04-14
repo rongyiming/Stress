@@ -102,7 +102,7 @@ def load_data(participant, file_path=file):
 
         
         # if row['Block Type'] in ['Math Test', 'Stroop Test', 'IQ Test']:
-        if row['Block Type'] in ['Math Test', 'IQ Test']:
+        if row['Block Type'] in ['Stroop Test']:
             dict['data'].append(data['ppg'].to_numpy())
             dict['label'].append(1)
         elif row['Block Type'] in ['Baseline', 'Neutral']:

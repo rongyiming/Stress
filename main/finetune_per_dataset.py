@@ -14,6 +14,10 @@ from datetime import datetime
 from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix, accuracy_score
 import torch.nn.init as init
 import time
+from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_curve
+import matplotlib.pyplot as plt
+
 
 local_now = datetime.now()
 
@@ -44,8 +48,8 @@ def set_seed(seed=1024):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False  # 固定CUDA卷积算法
 
-ALL_DATASETS = ['CLAS', 'WESAD', 'MTSPD']
-DATASETS = ['CLAS', 'WESAD']
+ALL_DATASETS = ['CLAS', 'WESAD', 'MTSPD', 'CATSA']
+DATASETS = ['WESAD']
 
 chosenlabels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
@@ -65,7 +69,7 @@ def parse_args():
     parser.add_argument('--resnet_depth', type=int, default=18, help='ResNet深度选择: 18, 34, 50')
     parser.add_argument('--frequency', type=int, default=32, help='数据采样频率')
     parser.add_argument('--lambda1', type=float, default=0.05, help='MoE负载均衡Loss权重')
-    parser.add_argument('--lambda2', type=float, default=0.5, help='特征-参数一致性Loss权重')
+    parser.add_argument('--lambda2', type=float, default=0.3, help='特征-参数一致性Loss权重')
     parser.add_argument('--alpha', type=float, default=0.3, help='融合权重')
     parser.add_argument('--pretrain_used', type=bool, default=True, help='是否使用预训练模型的ResNet参数')
     return parser.parse_args()
@@ -147,6 +151,8 @@ if __name__ == "__main__":
         if args.pretrain_used:    
             model.finetune()
 
+        if dataset_name not in DATASETS:
+            continue
         for epoch in range(args.epochs):
             model.train()
             running_loss = 0.0
@@ -195,7 +201,7 @@ if __name__ == "__main__":
                 best_val_loss = val_loss_epoch
                 torch.save(model.state_dict(), model_path)
                 losscnt = 0
-            elif losscnt > 20:
+            elif losscnt > 100:
                 print("验证损失未降低，提前停止训练。")
                 break
 
@@ -209,6 +215,7 @@ if __name__ == "__main__":
             test_losses = 0.0
 
             total_samples = 0
+            probabilities_list = []
             labels = []
             preds = []
             with torch.no_grad():
@@ -221,6 +228,7 @@ if __name__ == "__main__":
 
                     probabilities = F.softmax(test_outputs, dim=1)  # 形状: (batch_size, num_classes)
                     pred_labels = torch.argmax(probabilities, dim=1)  # 或直接用logits: torch.argmax(outputs, dim=1)
+                    probabilities_list.extend(probabilities[:, 1].cpu().tolist())  # 获取正类的概率
                     labels.extend(test_labels.cpu().tolist())
                     preds.extend(pred_labels.cpu().tolist())
                     total_samples += test_inputs.size(0)
@@ -230,6 +238,13 @@ if __name__ == "__main__":
             recall = recall_score(labels, preds, pos_label=1)
             f1 = f1_score(labels, preds, pos_label=1)
             cm = confusion_matrix(labels, preds)
+            all_probs = np.array(probabilities_list)   # 你需要在循环中提前创建 probabilities_list = [] 并 append
+            all_labels = np.array(labels)              # 你已经有了 labels 列表
+
+            # 方法一：One-vs-Rest 宏平均 AUC (最常用)
+            macro_auc = roc_auc_score(all_labels, all_probs, 
+                                    multi_class='ovr', 
+                          average='macro')
 
             print(f"train:{dataset_name};test:{dataset_name2}")
             print("混淆矩阵：")
@@ -238,6 +253,15 @@ if __name__ == "__main__":
             print(f"Precision: {precision:.4f}")
             print(f"Recall: {recall:.4f}")
             print(f"F1: {f1:.4f}")
+            print(f"AUC: {macro_auc:.4f}")
+
+            fpr, tpr, _ = roc_curve(all_labels, all_probs)
+            plt.plot(fpr, tpr, label=f'Our Model (AUC = {macro_auc:.3f})')
+            plt.plot([0,1], [0,1], 'k--')  # 随机猜测基准线
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.legend()
+
 
             with open(f'./main/resualt.log', 'a', encoding='utf-8') as f:
                 f.write(f"train:{dataset_name};test:{dataset_name2}\n")
@@ -247,6 +271,7 @@ if __name__ == "__main__":
                 f.write(f"Precision: {precision:.4f}\n")
                 f.write(f"Recall: {recall:.4f}\n")
                 f.write(f"F1: {f1:.4f}\n\n")
+                f.write(f"AUC: {macro_auc:.4f}\n\n")
     end_time = time.time()
     print(start_time, end_time)
     print(f"总训练时间: {end_time - start_time:.2f}s")
